@@ -1,0 +1,6 @@
+{
+  "name": "Nadiya’s Cake Craft",
+  "description": "Handcrafted pastel celebration cakes, bento boxes, and custom tiered patisserie in Dhaka with BDT pricing and direct WhatsApp ordering.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
