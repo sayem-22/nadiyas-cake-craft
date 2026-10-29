@@ -14,10 +14,22 @@ import { CartDrawer } from './components/CartDrawer';
 import { CatalogEditorModal } from './components/CatalogEditorModal';
 import { CraftAndContact } from './components/CraftAndContact';
 import { AdminLogin } from './components/AdminLogin';
+import { ResetPassword } from './components/ResetPassword';
 import { supabase } from './lib/supabase';
 
 const CATALOG_STORAGE_KEY = 'nadiyas_cake_craft_catalog_v1';
 const CART_STORAGE_KEY = 'nadiyas_cake_craft_cart_v1';
+const ADMIN_UID = 'a0c21275-4e48-41bf-b05e-4006faec9869';
+
+function isRecoveryUrl() {
+  const hash = window.location.hash;
+  const params = new URLSearchParams(window.location.search);
+
+  return (
+    hash.includes('type=recovery') ||
+    params.get('type') === 'recovery'
+  );
+}
 
 export default function App() {
   const [cakes, setCakes] = useState<CakeProduct[]>(INITIAL_CAKES);
@@ -35,7 +47,10 @@ export default function App() {
   const [catalogLoaded, setCatalogLoaded] = useState(false);
   const [saveStatus, setSaveStatus] = useState('');
 
-  // Restore cart from this device.
+  const [isPasswordRecovery, setIsPasswordRecovery] =
+    useState(isRecoveryUrl);
+
+  // Restore the cart on this device.
   useEffect(() => {
     try {
       const saved = localStorage.getItem(CART_STORAGE_KEY);
@@ -44,11 +59,11 @@ export default function App() {
         if (Array.isArray(parsed)) setCartItems(parsed);
       }
     } catch {
-      // Use an empty cart if local storage is unavailable.
+      // Ignore invalid local cart data.
     }
   }, []);
 
-  // Keep the cart local to this device.
+  // Save the cart locally.
   useEffect(() => {
     try {
       localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(cartItems));
@@ -57,7 +72,7 @@ export default function App() {
     }
   }, [cartItems]);
 
-  // Check whether the current Supabase session is the admin session.
+  // Detect password recovery and check the admin session.
   useEffect(() => {
     let active = true;
 
@@ -67,20 +82,27 @@ export default function App() {
       if (!active) return;
 
       const user = data.session?.user;
-      setIsAdmin(
-        user?.id === 'a0c21275-4e48-41bf-b05e-4006faec9869'
-      );
+
+      setIsAdmin(user?.id === ADMIN_UID);
+
+      if (isRecoveryUrl()) {
+        setIsPasswordRecovery(true);
+      }
     }
 
     void checkSession();
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!active) return;
+
       const user = session?.user;
-      setIsAdmin(
-        user?.id === 'a0c21275-4e48-41bf-b05e-4006faec9869'
-      );
+      setIsAdmin(user?.id === ADMIN_UID);
+
+      if (event === 'PASSWORD_RECOVERY' || isRecoveryUrl()) {
+        setIsPasswordRecovery(true);
+      }
     });
 
     return () => {
@@ -89,13 +111,11 @@ export default function App() {
     };
   }, []);
 
-  // Load the shared catalog from Supabase.
+  // Load the shared cake catalog.
   useEffect(() => {
     let active = true;
 
     async function loadCatalog() {
-      setCatalogLoaded(false);
-
       const { data, error } = await supabase
         .from('site_catalog')
         .select('cakes')
@@ -107,7 +127,6 @@ export default function App() {
       if (!error && Array.isArray(data?.cakes) && data.cakes.length > 0) {
         setCakes(data.cakes as CakeProduct[]);
       } else {
-        // The initial catalog remains visible until an admin saves it.
         setCakes(INITIAL_CAKES);
       }
 
@@ -121,7 +140,7 @@ export default function App() {
     };
   }, []);
 
-  // Keep a local backup for this device only.
+  // Keep a local backup of the catalog.
   useEffect(() => {
     if (!catalogLoaded) return;
 
@@ -161,7 +180,8 @@ export default function App() {
   }) => {
     const { cake, size, flavor, eggless, customMessage, quantity } = params;
     const trimmedMsg = customMessage.trim();
-    const compositeKey = `${cake.id}::${size.id}::${flavor}::${eggless}::${trimmedMsg.toLowerCase()}`;
+    const compositeKey =
+      `${cake.id}::${size.id}::${flavor}::${eggless}::${trimmedMsg.toLowerCase()}`;
 
     setCartItems((previous) => {
       const existingIndex = previous.findIndex(
@@ -239,7 +259,7 @@ export default function App() {
 
   const handleClearCart = () => setCartItems([]);
 
-  // Update the current catalog and keep cart details in sync.
+  // Update cakes and keep existing cart details in sync.
   const handleUpdateCakes = (nextCakes: CakeProduct[]) => {
     if (!isAdmin) {
       setShowAdminLogin(true);
@@ -247,14 +267,38 @@ export default function App() {
     }
 
     setCakes(nextCakes);
+
+    setCartItems((previous) =>
+      previous.map((item) => {
+        const updatedCake = nextCakes.find(
+          (cake) => cake.id === item.cakeId
+        );
+
+        if (!updatedCake) return item;
+
+        const updatedSize =
+          updatedCake.sizes.find((size) => size.id === item.size.id) ||
+          item.size;
+
+        return {
+          ...item,
+          cakeName: updatedCake.name,
+          cakeImage: updatedCake.image,
+          size: updatedSize,
+        };
+      })
+    );
+
     setSaveStatus('পরিবর্তন সেভ হচ্ছে…');
   };
 
-  // Save edits to the shared Supabase catalog.
+  // Save catalog changes online.
   useEffect(() => {
-    if (!isAdmin || !catalogLoaded || !saveStatus) return;
+    if (!isAdmin || !catalogLoaded) return;
 
     const timeout = window.setTimeout(async () => {
+      setSaveStatus('অনলাইনে সেভ হচ্ছে…');
+
       const { error } = await supabase.from('site_catalog').upsert(
         {
           id: 1,
@@ -265,7 +309,7 @@ export default function App() {
       );
 
       if (error) {
-        setSaveStatus('সেভ হয়নি। Supabase policy ও সংযোগ পরীক্ষা করুন।');
+        setSaveStatus('সেভ হয়নি। সংযোগ বা Supabase policy পরীক্ষা করুন।');
         console.error('Catalog save error:', error.message);
       } else {
         setSaveStatus('অনলাইনে সেভ হয়েছে ✓');
@@ -273,7 +317,7 @@ export default function App() {
     }, 1000);
 
     return () => window.clearTimeout(timeout);
-  }, [cakes, isAdmin, catalogLoaded, saveStatus]);
+  }, [cakes, isAdmin, catalogLoaded]);
 
   const handleResetCakes = () => {
     if (!isAdmin) {
@@ -313,12 +357,26 @@ export default function App() {
     setSaveStatus('');
   };
 
+  const handlePasswordResetCancel = () => {
+    setIsPasswordRecovery(false);
+    window.history.replaceState(
+      {},
+      document.title,
+      window.location.pathname
+    );
+  };
+
   const handleLogout = async () => {
     await supabase.auth.signOut();
     setIsAdmin(false);
     setEditorState({ open: false });
     setSaveStatus('');
   };
+
+  // Show the password form when the recovery link is opened.
+  if (isPasswordRecovery) {
+    return <ResetPassword onCancel={handlePasswordResetCancel} />;
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-[#FDF9F6] text-[#2B1E1A]">
