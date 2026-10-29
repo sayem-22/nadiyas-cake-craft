@@ -13,65 +13,127 @@ import { ProductDetailView } from './components/ProductDetailView';
 import { CartDrawer } from './components/CartDrawer';
 import { CatalogEditorModal } from './components/CatalogEditorModal';
 import { CraftAndContact } from './components/CraftAndContact';
+import { AdminLogin } from './components/AdminLogin';
+import { supabase } from './lib/supabase';
 
 const CATALOG_STORAGE_KEY = 'nadiyas_cake_craft_catalog_v1';
 const CART_STORAGE_KEY = 'nadiyas_cake_craft_cart_v1';
 
 export default function App() {
-  const [cakes, setCakes] = useState<CakeProduct[]>(() => {
-    try {
-      const saved = localStorage.getItem(CATALOG_STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      }
-    } catch {
-      // Fallback to initial file catalog
-    }
-    return INITIAL_CAKES;
-  });
+  const [cakes, setCakes] = useState<CakeProduct[]>(INITIAL_CAKES);
+  const [cartItems, setCartItems] = useState<CartItem[]>([]);
+  const [selectedCakeId, setSelectedCakeId] = useState<string | null>(null);
+  const [cartOpen, setCartOpen] = useState(false);
 
-  const [cartItems, setCartItems] = useState<CartItem[]>(() => {
+  const [editorState, setEditorState] = useState<{
+    open: boolean;
+    cakeId?: string;
+  }>({ open: false });
+
+  const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [saveStatus, setSaveStatus] = useState('');
+
+  // Restore cart from this device.
+  useEffect(() => {
     try {
       const saved = localStorage.getItem(CART_STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed;
-        }
+        if (Array.isArray(parsed)) setCartItems(parsed);
       }
     } catch {
-      // Fallback to empty cart
+      // Use an empty cart if local storage is unavailable.
     }
-    return [];
-  });
+  }, []);
 
-  const [selectedCakeId, setSelectedCakeId] = useState<string | null>(null);
-  const [cartOpen, setCartOpen] = useState(false);
-  const [editorState, setEditorState] = useState<{ open: boolean; cakeId?: string }>({
-    open: false,
-  });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify(cakes));
-    } catch {
-      // Ignore storage quota errors
-    }
-  }, [cakes]);
-
+  // Keep the cart local to this device.
   useEffect(() => {
     try {
       localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(cartItems));
     } catch {
-      // Ignore storage quota errors
+      // Ignore local storage errors.
     }
   }, [cartItems]);
 
+  // Check whether the current Supabase session is the admin session.
+  useEffect(() => {
+    let active = true;
+
+    async function checkSession() {
+      const { data } = await supabase.auth.getSession();
+
+      if (!active) return;
+
+      const user = data.session?.user;
+      setIsAdmin(
+        user?.id === 'a0c21275-4e48-41bf-b05e-4006faec9869'
+      );
+    }
+
+    void checkSession();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      const user = session?.user;
+      setIsAdmin(
+        user?.id === 'a0c21275-4e48-41bf-b05e-4006faec9869'
+      );
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  // Load the shared catalog from Supabase.
+  useEffect(() => {
+    let active = true;
+
+    async function loadCatalog() {
+      setCatalogLoaded(false);
+
+      const { data, error } = await supabase
+        .from('site_catalog')
+        .select('cakes')
+        .eq('id', 1)
+        .maybeSingle();
+
+      if (!active) return;
+
+      if (!error && Array.isArray(data?.cakes) && data.cakes.length > 0) {
+        setCakes(data.cakes as CakeProduct[]);
+      } else {
+        // The initial catalog remains visible until an admin saves it.
+        setCakes(INITIAL_CAKES);
+      }
+
+      setCatalogLoaded(true);
+    }
+
+    void loadCatalog();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Keep a local backup for this device only.
+  useEffect(() => {
+    if (!catalogLoaded) return;
+
+    try {
+      localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify(cakes));
+    } catch {
+      // Ignore storage quota errors.
+    }
+  }, [cakes, catalogLoaded]);
+
   const selectedCake = useMemo(
-    () => cakes.find((c) => c.id === selectedCakeId) || null,
+    () => cakes.find((cake) => cake.id === selectedCakeId) || null,
     [cakes, selectedCakeId]
   );
 
@@ -81,7 +143,11 @@ export default function App() {
   );
 
   const cartSubtotalBdt = useMemo(
-    () => cartItems.reduce((sum, item) => sum + item.size.priceBdt * item.quantity, 0),
+    () =>
+      cartItems.reduce(
+        (sum, item) => sum + item.size.priceBdt * item.quantity,
+        0
+      ),
     [cartItems]
   );
 
@@ -97,11 +163,14 @@ export default function App() {
     const trimmedMsg = customMessage.trim();
     const compositeKey = `${cake.id}::${size.id}::${flavor}::${eggless}::${trimmedMsg.toLowerCase()}`;
 
-    setCartItems((prev) => {
-      const existingIndex = prev.findIndex((item) => item.cartItemId === compositeKey);
+    setCartItems((previous) => {
+      const existingIndex = previous.findIndex(
+        (item) => item.cartItemId === compositeKey
+      );
+
       if (existingIndex >= 0) {
-        return prev.map((item, idx) =>
-          idx === existingIndex
+        return previous.map((item, index) =>
+          index === existingIndex
             ? {
                 ...item,
                 cakeName: cake.name,
@@ -114,7 +183,7 @@ export default function App() {
       }
 
       return [
-        ...prev,
+        ...previous,
         {
           cartItemId: compositeKey,
           cakeId: cake.id,
@@ -139,12 +208,11 @@ export default function App() {
       servings: '6–8 slices',
       priceBdt: 1500,
     };
-    const defaultFlavor = cake.flavors[0] || 'Signature Vanilla';
 
     handleAddToCart({
       cake,
       size: defaultSize,
-      flavor: defaultFlavor,
+      flavor: cake.flavors[0] || 'Signature Vanilla',
       eggless: false,
       customMessage: '',
       quantity: 1,
@@ -152,8 +220,8 @@ export default function App() {
   };
 
   const handleUpdateQuantity = (cartItemId: string, delta: number) => {
-    setCartItems((prev) =>
-      prev
+    setCartItems((previous) =>
+      previous
         .map((item) =>
           item.cartItemId === cartItemId
             ? { ...item, quantity: item.quantity + delta }
@@ -164,39 +232,56 @@ export default function App() {
   };
 
   const handleRemoveItem = (cartItemId: string) => {
-    setCartItems((prev) => prev.filter((item) => item.cartItemId !== cartItemId));
-  };
-
-  const handleClearCart = () => {
-    setCartItems([]);
-  };
-
-  const handleUpdateCakes = (nextCakes: CakeProduct[]) => {
-    setCakes(nextCakes);
-    // Keep cart item names, images, and updated size prices synced with catalog edits
-    setCartItems((prev) =>
-      prev.map((item) => {
-        const updatedCake = nextCakes.find((c) => c.id === item.cakeId);
-        if (!updatedCake) return item;
-        const updatedSize =
-          updatedCake.sizes.find((s) => s.id === item.size.id) || item.size;
-        return {
-          ...item,
-          cakeName: updatedCake.name,
-          cakeImage: updatedCake.image,
-          size: updatedSize,
-        };
-      })
+    setCartItems((previous) =>
+      previous.filter((item) => item.cartItemId !== cartItemId)
     );
   };
 
-  const handleResetCakes = () => {
-    setCakes(INITIAL_CAKES);
-    try {
-      localStorage.removeItem(CATALOG_STORAGE_KEY);
-    } catch {
-      // Ignore
+  const handleClearCart = () => setCartItems([]);
+
+  // Update the current catalog and keep cart details in sync.
+  const handleUpdateCakes = (nextCakes: CakeProduct[]) => {
+    if (!isAdmin) {
+      setShowAdminLogin(true);
+      return;
     }
+
+    setCakes(nextCakes);
+    setSaveStatus('পরিবর্তন সেভ হচ্ছে…');
+  };
+
+  // Save edits to the shared Supabase catalog.
+  useEffect(() => {
+    if (!isAdmin || !catalogLoaded || !saveStatus) return;
+
+    const timeout = window.setTimeout(async () => {
+      const { error } = await supabase.from('site_catalog').upsert(
+        {
+          id: 1,
+          cakes,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'id' }
+      );
+
+      if (error) {
+        setSaveStatus('সেভ হয়নি। Supabase policy ও সংযোগ পরীক্ষা করুন।');
+        console.error('Catalog save error:', error.message);
+      } else {
+        setSaveStatus('অনলাইনে সেভ হয়েছে ✓');
+      }
+    }, 1000);
+
+    return () => window.clearTimeout(timeout);
+  }, [cakes, isAdmin, catalogLoaded, saveStatus]);
+
+  const handleResetCakes = () => {
+    if (!isAdmin) {
+      setShowAdminLogin(true);
+      return;
+    }
+
+    handleUpdateCakes(INITIAL_CAKES);
   };
 
   const handleSelectCake = (cake: CakeProduct) => {
@@ -206,10 +291,33 @@ export default function App() {
 
   const handleBrowseCollection = () => {
     setSelectedCakeId(null);
-    const el = document.getElementById('collection');
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth' });
+    document.getElementById('collection')?.scrollIntoView({
+      behavior: 'smooth',
+    });
+  };
+
+  const openEditor = (cakeId?: string) => {
+    if (!isAdmin) {
+      setShowAdminLogin(true);
+      return;
     }
+
+    setEditorState({
+      open: true,
+      cakeId: cakeId || selectedCakeId || cakes[0]?.id,
+    });
+  };
+
+  const handleLoginSuccess = () => {
+    setShowAdminLogin(false);
+    setSaveStatus('');
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setIsAdmin(false);
+    setEditorState({ open: false });
+    setSaveStatus('');
   };
 
   return (
@@ -218,11 +326,35 @@ export default function App() {
         cartCount={cartCount}
         cartSubtotalBdt={cartSubtotalBdt}
         onOpenCart={() => setCartOpen(true)}
-        onOpenEditor={() =>
-          setEditorState({ open: true, cakeId: selectedCakeId || cakes[0]?.id })
-        }
+        onOpenEditor={() => openEditor()}
         onNavigateHome={() => setSelectedCakeId(null)}
       />
+
+      <div className="flex items-center justify-end gap-3 px-4 py-2 text-sm">
+        {saveStatus && (
+          <span role="status" className="text-gray-600">
+            {saveStatus}
+          </span>
+        )}
+
+        {isAdmin ? (
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="rounded-lg border border-pink-300 px-3 py-2 text-pink-700"
+          >
+            Admin Logout
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setShowAdminLogin(true)}
+            className="rounded-lg border border-pink-300 px-3 py-2 text-pink-700"
+          >
+            Admin Login
+          </button>
+        )}
+      </div>
 
       <main className="flex-1">
         {selectedCake ? (
@@ -230,7 +362,7 @@ export default function App() {
             cake={selectedCake}
             onBack={() => setSelectedCakeId(null)}
             onAddToCart={handleAddToCart}
-            onEditCake={(cakeId) => setEditorState({ open: true, cakeId })}
+            onEditCake={(cakeId) => openEditor(cakeId)}
           />
         ) : (
           <>
@@ -239,16 +371,12 @@ export default function App() {
               cakes={cakes}
               onSelectCake={handleSelectCake}
               onQuickAddCake={handleQuickAddCake}
-              onEditCake={(cakeId) => setEditorState({ open: true, cakeId })}
+              onEditCake={(cakeId) => openEditor(cakeId)}
             />
           </>
         )}
 
-        <CraftAndContact
-          onOpenEditor={() =>
-            setEditorState({ open: true, cakeId: selectedCakeId || cakes[0]?.id })
-          }
-        />
+        <CraftAndContact onOpenEditor={() => openEditor()} />
       </main>
 
       <CartDrawer
@@ -261,13 +389,20 @@ export default function App() {
       />
 
       <CatalogEditorModal
-        isOpen={editorState.open}
+        isOpen={editorState.open && isAdmin}
         initialCakeId={editorState.cakeId}
         cakes={cakes}
         onClose={() => setEditorState({ open: false })}
         onUpdateCakes={handleUpdateCakes}
         onResetCakes={handleResetCakes}
       />
+
+      {showAdminLogin && (
+        <AdminLogin
+          onLoginSuccess={handleLoginSuccess}
+          onCancel={() => setShowAdminLogin(false)}
+        />
+      )}
     </div>
   );
 }
